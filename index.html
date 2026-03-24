@@ -5,13 +5,14 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Origami Triangle Grid</title>
 <style>
-  body { font-family: sans-serif; margin: 0; padding: 10px 12px 14px; background: #f9f9f7; color: #1a1a18; }
+  html,body { height: 100%; margin: 0; }
+  body { font-family: sans-serif; padding: 10px 12px 6px; background: #f9f9f7; color: #1a1a18; display: flex; flex-direction: column; box-sizing: border-box; overflow: hidden; }
   #bar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
   #bar label { font-size: 13px; color: #555; display: flex; align-items: center; gap: 6px; }
   #bar select, #bar button { font-size: 13px; padding: 3px 10px; border: 0.5px solid #ccc; border-radius: 6px; background: #f0efeb; color: #1a1a18; cursor: pointer; }
   #leg { display: flex; gap: 14px; font-size: 12px; color: #666; margin-bottom: 6px; align-items: center; flex-wrap: wrap; }
   .ls { display: inline-block; width: 24px; height: 2px; margin-right: 4px; vertical-align: middle; }
-  #cvwrap { position: relative; }
+  #cvwrap { position: relative; flex: 1; min-height: 0; }
   #cv { display: block; cursor: crosshair; border: 0.5px solid #ddd; border-radius: 8px; }
   #inf { font-size: 12px; color: #888; margin-top: 5px; min-height: 16px; }
   #popup { display: none; position: absolute; background: #fff; border: 0.5px solid #ccc; border-radius: 8px; padding: 8px; gap: 6px; flex-direction: column; z-index: 10; min-width: 140px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
@@ -24,9 +25,11 @@
 <div id="bar">
   <label>Divisions:
     <select id="sz" onchange="build()">
-      <option value="8">8</option><option value="12">12</option>
-      <option value="16" selected>16</option><option value="20">20</option>
-      <option value="24">24</option><option value="32">32</option>
+      <option value="8">8</option>
+      <option value="16" selected>16</option>
+      <option value="32">32</option>
+      <option value="64">64</option>
+      <option value="128">128</option>
     </select>
   </label>
   <button onclick="clearAll()">Clear</button>
@@ -58,13 +61,13 @@ let originLine,vertices,rayBoundaries;
 let guidedMode,guidedVertices,guidedHovered;
 let guidedRayOrigin,guidedRayLk,guidedRayAngle;
 let guidedQueue;
-
+ 
 function clamp(v,lo,hi){return Math.max(lo,Math.min(hi,v));}
 function snap(v){return Math.round(v*1e3)/1e3;}
 function ptKey(x,y){return snap(x)+','+snap(y);}
 function segKey(ax,ay,bx,by){const ka=ptKey(ax,ay),kb=ptKey(bx,by);return ka<kb?ka+'|'+kb:kb+'|'+ka;}
 function vKey(lk,segIdx){return lk+'::'+segIdx;}
-
+ 
 function clipLine(px,py,dx,dy){
   let lo=-1e15,hi=1e15;
   if(Math.abs(dx)>1e-10){const t0=(0-px)/dx,t1=(Q-px)/dx;lo=Math.max(lo,Math.min(t0,t1));hi=Math.min(hi,Math.max(t0,t1));}
@@ -88,7 +91,7 @@ function segDist(px,py,ax,ay,bx,by){
 }
 function vecAngle(dx,dy){return(Math.atan2(dy,dx)*180/Math.PI+360)%360;}
 function angleDiff(a,b){let d=Math.abs(a-b)%360;return d>180?360-d:d;}
-
+ 
 function resetState(){
   hoveredLine=null;selectedLine=null;hoveredVertex=null;hoveredBlocked=false;pickedVertex=null;
   originLine=null;vertices=new Map();rayBoundaries=new Map();
@@ -114,10 +117,10 @@ function drainGuidedQueue(){
   }
   return false;
 }
-
+ 
 function build(){
   N=parseInt(document.getElementById('sz').value);
-  const W=Math.min(cvwrap.clientWidth||560,560);
+  const W=Math.min(cvwrap.clientWidth||window.innerWidth, cvwrap.clientHeight||window.innerHeight);
   Q=W;RH=Q/N;SIDE=RH*2/S3;
   const stepD=SIDE*S3;
   const cRange=Math.ceil((Q*S3+Q)/stepD+2)*stepD;
@@ -153,7 +156,7 @@ function build(){
   for(const l of famC)registerLine(l,famA,famB);
   draw();
 }
-
+ 
 function addVerticesForRange(lk,fromSeg,toSeg){
   const ld=lines.get(lk);if(!ld)return;
   for(let i=fromSeg;i<toSeg;i++){
@@ -473,7 +476,7 @@ function findNearestGuidedVertex(mx,my){
   }
   return best||null;
 }
-
+ 
 function enterGuidedMode(originPt,blockedNeighbor,excludeLks){
   const{lineKey:rayLk,rayAngle}=blockedNeighbor;
   const ld=lines.get(rayLk);if(!ld)return;
@@ -493,7 +496,7 @@ function enterGuidedMode(originPt,blockedNeighbor,excludeLks){
     guidedRayOrigin=originPt;guidedRayLk=rayLk;guidedRayAngle=rayAngle;
   }
 }
-
+ 
 function onGuidedVertexSelected(gv){
   const rayOrigin=guidedRayOrigin,rayLk=guidedRayLk,rayAngle=guidedRayAngle;
   clearGuidedMode();
@@ -535,7 +538,7 @@ function onGuidedVertexSelected(gv){
   if(autoTriggerV)onBlockedVertex(autoTriggerV);
   if(!guidedMode)drainGuidedQueue();
 }
-
+ 
 function doTrim(v,side){
   traceAndRemove(v.lineKey,v.segIdx,side);
   addRayBoundary(v.lineKey,v.segIdx);
@@ -545,7 +548,7 @@ function doTrim(v,side){
   draw();
   document.getElementById('inf').textContent='Trimmed. Hover a vertex to trim further, or Clear to reset.';
 }
-
+ 
 function onBlockedVertex(v){
   const side=autoDetectSide(v);if(!side)return;
   traceAndRemove(v.lineKey,v.segIdx,side);
@@ -566,10 +569,10 @@ function onBlockedVertex(v){
   hoveredVertex=null;hoveredBlocked=false;
   if(!guidedMode)drainGuidedQueue();
 }
-
+ 
 function handleTrim(side){if(!pickedVertex)return;const v=pickedVertex;closePopup();doTrim(v,side);}
 function closePopup(){popup.classList.remove('on');pickedVertex=null;}
-
+ 
 function draw(){
   ctx.clearRect(0,0,Q,Q);ctx.fillStyle='#fafaf8';ctx.fillRect(0,0,Q,Q);
   const hasSel=selectedLine!==null;
@@ -600,14 +603,14 @@ function draw(){
     }
   }
 }
-
+ 
 function getMouse(e){const r=cv.getBoundingClientRect();return[(e.clientX-r.left)*(cv.width/r.width),(e.clientY-r.top)*(cv.height/r.height)];}
 function showPopup(clientX,clientY){
   const r=cvwrap.getBoundingClientRect();
   popup.style.left=(clientX-r.left+8)+'px';popup.style.top=(clientY-r.top+8)+'px';
   popup.classList.add('on');
 }
-
+ 
 cv.addEventListener('mousemove',e=>{
   if(popup.classList.contains('on'))return;
   const[mx,my]=getMouse(e);
@@ -637,12 +640,12 @@ cv.addEventListener('mousemove',e=>{
     cv.style.cursor='crosshair';
   }
 });
-
+ 
 cv.addEventListener('mouseleave',()=>{
   hoveredLine=null;hoveredVertex=null;hoveredBlocked=false;guidedHovered=null;
   if(!popup.classList.contains('on'))draw();
 });
-
+ 
 cv.addEventListener('click',e=>{
   if(popup.classList.contains('on')){closePopup();draw();return;}
   const[mx,my]=getMouse(e);
@@ -681,13 +684,13 @@ cv.addEventListener('click',e=>{
     document.getElementById('inf').textContent='Hover a vertex on any active line to trim.';
   }
 });
-
+ 
 function clearAll(){
   for(const c of creases.values())c.active=false;
   resetState();closePopup();cv.style.cursor='crosshair';draw();
   document.getElementById('inf').textContent='Hover a line to highlight it, click to select.';
 }
-
+ 
 build();
 window.addEventListener('resize',build);
 </script>
