@@ -1,0 +1,695 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Origami Triangle Grid</title>
+<style>
+  body { font-family: sans-serif; margin: 0; padding: 10px 12px 14px; background: #f9f9f7; color: #1a1a18; }
+  #bar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
+  #bar label { font-size: 13px; color: #555; display: flex; align-items: center; gap: 6px; }
+  #bar select, #bar button { font-size: 13px; padding: 3px 10px; border: 0.5px solid #ccc; border-radius: 6px; background: #f0efeb; color: #1a1a18; cursor: pointer; }
+  #leg { display: flex; gap: 14px; font-size: 12px; color: #666; margin-bottom: 6px; align-items: center; flex-wrap: wrap; }
+  .ls { display: inline-block; width: 24px; height: 2px; margin-right: 4px; vertical-align: middle; }
+  #cvwrap { position: relative; }
+  #cv { display: block; cursor: crosshair; border: 0.5px solid #ddd; border-radius: 8px; }
+  #inf { font-size: 12px; color: #888; margin-top: 5px; min-height: 16px; }
+  #popup { display: none; position: absolute; background: #fff; border: 0.5px solid #ccc; border-radius: 8px; padding: 8px; gap: 6px; flex-direction: column; z-index: 10; min-width: 140px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
+  #popup.on { display: flex; }
+  #popup button { padding: 6px 12px; border: 0.5px solid #ccc; border-radius: 6px; background: #f0efeb; color: #1a1a18; font-size: 12px; cursor: pointer; text-align: left; }
+  #popup button:hover { background: #e5e3de; }
+</style>
+</head>
+<body>
+<div id="bar">
+  <label>Divisions:
+    <select id="sz" onchange="build()">
+      <option value="8">8</option><option value="12">12</option>
+      <option value="16" selected>16</option><option value="20">20</option>
+      <option value="24">24</option><option value="32">32</option>
+    </select>
+  </label>
+  <button onclick="clearAll()">Clear</button>
+</div>
+<div id="leg">
+  <span><span class="ls" style="background:#c0392b"></span>Selected</span>
+  <span><span class="ls" style="background:rgba(120,118,110,0.3)"></span>Unset</span>
+  <span><span class="ls" style="background:#2471a3"></span>Intersection vertex</span>
+  <span><span class="ls" style="background:#8e44ad"></span>Guided selection</span>
+</div>
+<div id="cvwrap">
+  <canvas id="cv"></canvas>
+  <div id="popup">
+    <button onmousedown="handleTrim('left')">Unset left side</button>
+    <button onmousedown="handleTrim('right')">Unset right side</button>
+    <button onmousedown="closePopup()" style="color:#888">Cancel</button>
+  </div>
+</div>
+<div id="inf">Hover a line to highlight it, click to select.</div>
+<script>
+const cv=document.getElementById('cv');
+const ctx=cv.getContext('2d');
+const cvwrap=document.getElementById('cvwrap');
+const popup=document.getElementById('popup');
+const S3=Math.sqrt(3);
+let N,Q,RH,SIDE,lines,creases,segsByVertex;
+let hoveredLine,selectedLine,hoveredVertex,hoveredBlocked,pickedVertex;
+let originLine,vertices,rayBoundaries;
+let guidedMode,guidedVertices,guidedHovered;
+let guidedRayOrigin,guidedRayLk,guidedRayAngle;
+let guidedQueue;
+
+function clamp(v,lo,hi){return Math.max(lo,Math.min(hi,v));}
+function snap(v){return Math.round(v*1e3)/1e3;}
+function ptKey(x,y){return snap(x)+','+snap(y);}
+function segKey(ax,ay,bx,by){const ka=ptKey(ax,ay),kb=ptKey(bx,by);return ka<kb?ka+'|'+kb:kb+'|'+ka;}
+function vKey(lk,segIdx){return lk+'::'+segIdx;}
+
+function clipLine(px,py,dx,dy){
+  let lo=-1e15,hi=1e15;
+  if(Math.abs(dx)>1e-10){const t0=(0-px)/dx,t1=(Q-px)/dx;lo=Math.max(lo,Math.min(t0,t1));hi=Math.min(hi,Math.max(t0,t1));}
+  else if(px<-1e-6||px>Q+1e-6)return null;
+  if(Math.abs(dy)>1e-10){const t0=(0-py)/dy,t1=(Q-py)/dy;lo=Math.max(lo,Math.min(t0,t1));hi=Math.min(hi,Math.max(t0,t1));}
+  else if(py<-1e-6||py>Q+1e-6)return null;
+  if(hi-lo<1e-9)return null;
+  return[clamp(px+dx*lo,0,Q),clamp(py+dy*lo,0,Q),clamp(px+dx*hi,0,Q),clamp(py+dy*hi,0,Q)];
+}
+function xLines(l1,l2){
+  const det=l1.dx*l2.dy-l1.dy*l2.dx;
+  if(Math.abs(det)<1e-10)return null;
+  const t=((l2.px-l1.px)*l2.dy-(l2.py-l1.py)*l2.dx)/det;
+  return[l1.px+t*l1.dx,l1.py+t*l1.dy];
+}
+function segDist(px,py,ax,ay,bx,by){
+  const dx=bx-ax,dy=by-ay,l2=dx*dx+dy*dy;
+  if(l2<1e-12)return Math.hypot(px-ax,py-ay);
+  const t=clamp(((px-ax)*dx+(py-ay)*dy)/l2,0,1);
+  return Math.hypot(px-(ax+t*dx),py-(ay+t*dy));
+}
+function vecAngle(dx,dy){return(Math.atan2(dy,dx)*180/Math.PI+360)%360;}
+function angleDiff(a,b){let d=Math.abs(a-b)%360;return d>180?360-d:d;}
+
+function resetState(){
+  hoveredLine=null;selectedLine=null;hoveredVertex=null;hoveredBlocked=false;pickedVertex=null;
+  originLine=null;vertices=new Map();rayBoundaries=new Map();
+  guidedMode=false;guidedVertices=new Map();guidedHovered=null;
+  guidedRayOrigin=null;guidedRayLk=null;guidedRayAngle=null;
+  guidedQueue=[];
+}
+function clearGuidedMode(){
+  guidedMode=false;guidedVertices=new Map();guidedHovered=null;
+  guidedRayOrigin=null;guidedRayLk=null;guidedRayAngle=null;
+}
+function enqueueGuidedMode(originPt,blockedNeighbor,excludeLks){
+  guidedQueue.push({originPt,blockedNeighbor,excludeLks});
+}
+function drainGuidedQueue(){
+  while(guidedQueue.length>0){
+    const{originPt,blockedNeighbor,excludeLks}=guidedQueue.shift();
+    const suppress=guidedRangeHasActiveSegments(originPt,blockedNeighbor.lineKey,blockedNeighbor.rayAngle,excludeLks);
+    if(!suppress){
+      enterGuidedMode(originPt,blockedNeighbor,excludeLks);
+      if(guidedMode)return true;
+    }
+  }
+  return false;
+}
+
+function build(){
+  N=parseInt(document.getElementById('sz').value);
+  const W=Math.min(cvwrap.clientWidth||560,560);
+  Q=W;RH=Q/N;SIDE=RH*2/S3;
+  const stepD=SIDE*S3;
+  const cRange=Math.ceil((Q*S3+Q)/stepD+2)*stepD;
+  cv.width=Q;cv.height=Q;cv.style.width=Q+'px';cv.style.height=Q+'px';
+  lines=new Map();creases=new Map();segsByVertex=new Map();
+  resetState();closePopup();
+  const EPS=1e-6;
+  function inside(x,y){return x>=-EPS&&x<=Q+EPS&&y>=-EPS&&y<=Q+EPS;}
+  const famA=[],famB=[],famC=[];
+  for(let k=0;k<=N;k++){const y=snap(k*RH),seg=clipLine(0,y,1,0);if(seg)famA.push({seg,lk:'A:'+y,dx:1,dy:0,px:0,py:y});}
+  for(let c=-cRange;c<=cRange;c+=stepD){const cs=snap(c),seg=clipLine(0,cs,1,S3);if(seg)famB.push({seg,lk:'B:'+cs,dx:1,dy:S3,px:0,py:cs});}
+  for(let c=-cRange;c<=cRange;c+=stepD){const cs=snap(c),seg=clipLine(0,cs,1,-S3);if(seg)famC.push({seg,lk:'C:'+cs,dx:1,dy:-S3,px:0,py:cs});}
+  function addToSV(vk,sk){if(!segsByVertex.has(vk))segsByVertex.set(vk,[]);segsByVertex.get(vk).push(sk);}
+  function registerLine(line,o1,o2){
+    const pts=[[line.seg[0],line.seg[1]],[line.seg[2],line.seg[3]]];
+    for(const o of[...o1,...o2]){const p=xLines(line,o);if(p&&inside(p[0],p[1]))pts.push(p);}
+    const dot=p=>p[0]*line.dx+p[1]*line.dy;pts.sort((a,b)=>dot(a)-dot(b));
+    const segKeys=[],verts=[];
+    for(let i=0;i<pts.length-1;i++){
+      const ax=snap(clamp(pts[i][0],0,Q)),ay=snap(clamp(pts[i][1],0,Q));
+      const bx=snap(clamp(pts[i+1][0],0,Q)),by=snap(clamp(pts[i+1][1],0,Q));
+      if(Math.hypot(bx-ax,by-ay)<0.5)continue;
+      const sk=segKey(ax,ay,bx,by);
+      if(!creases.has(sk))creases.set(sk,{ax,ay,bx,by,lineKey:line.lk,active:false});
+      segKeys.push(sk);addToSV(ptKey(ax,ay),sk);addToSV(ptKey(bx,by),sk);
+      if(!verts.length)verts.push({x:ax,y:ay,idx:0});
+      verts.push({x:bx,y:by,idx:verts.length});
+    }
+    lines.set(line.lk,{desc:line,segKeys,verts});
+  }
+  for(const l of famA)registerLine(l,famB,famC);
+  for(const l of famB)registerLine(l,famA,famC);
+  for(const l of famC)registerLine(l,famA,famB);
+  draw();
+}
+
+function addVerticesForRange(lk,fromSeg,toSeg){
+  const ld=lines.get(lk);if(!ld)return;
+  for(let i=fromSeg;i<toSeg;i++){
+    const v=ld.verts[i+1];if(!v)continue;
+    const k=vKey(lk,i+1);
+    if(!vertices.has(k))vertices.set(k,{x:v.x,y:v.y,lineKey:lk,segIdx:i+1});
+  }
+}
+function addRayBoundary(lk,vertIdx){
+  if(!rayBoundaries.has(lk))rayBoundaries.set(lk,new Set());
+  rayBoundaries.get(lk).add(vertIdx);
+}
+function applyDoubleBoundDeletion(){
+  for(const[lk,bounds]of rayBoundaries){
+    if(bounds.size<2)continue;
+    const sorted=[...bounds].sort((a,b)=>a-b);
+    const lo=sorted[0],hi=sorted[sorted.length-1];
+    for(let i=lo;i<hi;i++)vertices.delete(vKey(lk,i+1));
+  }
+}
+function traceAndRemove(lk,trimVertIdx,direction){
+  const ld=lines.get(lk);if(!ld)return;
+  const segs=ld.segKeys;
+  if(direction==='left'){
+    for(let i=trimVertIdx-1;i>=0;i--){
+      const c=creases.get(segs[i]);if(!c||!c.active)break;
+      c.active=false;vertices.delete(vKey(lk,i+1));vertices.delete(vKey(lk,i));
+    }
+  } else {
+    for(let i=trimVertIdx;i<segs.length;i++){
+      const c=creases.get(segs[i]);if(!c||!c.active)break;
+      c.active=false;vertices.delete(vKey(lk,i+1));vertices.delete(vKey(lk,i));
+    }
+  }
+  vertices.delete(vKey(lk,trimVertIdx));
+}
+function computeRayRange(startVertex,lk,rayAngle){
+  const ld=lines.get(lk);if(!ld)return null;
+  let si=-1;
+  for(let i=0;i<ld.verts.length;i++){if(Math.hypot(ld.verts[i].x-startVertex.x,ld.verts[i].y-startVertex.y)<1){si=i;break;}}
+  if(si<0)return null;
+  const fwd=vecAngle(ld.desc.dx,ld.desc.dy);
+  if(angleDiff(rayAngle,fwd)<90)return{startIdx:si,endIdx:ld.segKeys.length-1,boundaryVertIdx:si};
+  else return{startIdx:0,endIdx:si-1,boundaryVertIdx:si};
+}
+function getRaySegSet(lk,range){
+  const ld=lines.get(lk);if(!ld||!range)return new Set();
+  const s=new Set();
+  for(let i=range.startIdx;i<=range.endIdx;i++)s.add(ld.segKeys[i]);
+  return s;
+}
+function activateRay(startVertex,lk,rayAngle){
+  const ld=lines.get(lk);if(!ld)return;
+  const range=computeRayRange(startVertex,lk,rayAngle);if(!range)return;
+  const{startIdx,endIdx,boundaryVertIdx}=range;
+  for(let i=startIdx;i<=endIdx;i++){const c=creases.get(ld.segKeys[i]);if(c)c.active=true;}
+  addVerticesForRange(lk,startIdx,endIdx);
+  addRayBoundary(lk,boundaryVertIdx);
+  applyDoubleBoundDeletion();
+}
+function activatePartialRaySegments(lk,rayAngle,startVertIdx,stopVertIdx){
+  const ld=lines.get(lk);if(!ld)return;
+  const goForward=angleDiff(rayAngle,vecAngle(ld.desc.dx,ld.desc.dy))<90;
+  if(goForward){for(let i=startVertIdx;i<stopVertIdx;i++){const c=creases.get(ld.segKeys[i]);if(c)c.active=true;}}
+  else{for(let i=stopVertIdx;i<startVertIdx;i++){const c=creases.get(ld.segKeys[i]);if(c)c.active=true;}}
+}
+function getNeighborsFromPoint(vPoint,unsetAngle,excludeLk){
+  const vk=ptKey(vPoint.x,vPoint.y);const result=[];
+  for(const sk of(segsByVertex.get(vk)||[])){
+    const c=creases.get(sk);if(!c||c.lineKey===excludeLk)continue;
+    let sdx,sdy;
+    if(Math.hypot(c.ax-vPoint.x,c.ay-vPoint.y)<1){sdx=c.bx-c.ax;sdy=c.by-c.ay;}
+    else{sdx=c.ax-c.bx;sdy=c.ay-c.by;}
+    const segAngle=vecAngle(sdx,sdy);
+    if(angleDiff(segAngle,unsetAngle)<90)result.push({lineKey:c.lineKey,rayAngle:segAngle});
+  }
+  return result;
+}
+function activate60Neighbors(boundaryVertex,unsetSide,trimmedLk){
+  const ld=lines.get(trimmedLk);if(!ld)return;
+  const fa=vecAngle(ld.desc.dx,ld.desc.dy);
+  const unsetAngle=unsetSide==='left'?(fa+180)%360:fa;
+  const neighbors=getNeighborsFromPoint(boundaryVertex,unsetAngle,trimmedLk);
+  for(const n of neighbors)activateRay(boundaryVertex,n.lineKey,n.rayAngle);
+}
+function rayIntersectsActive(segs,excludeLks){
+  for(const sk of segs){
+    const c=creases.get(sk);if(!c)continue;
+    const rayLk=c.lineKey;
+    for(const[vx,vy]of[[c.ax,c.ay],[c.bx,c.by]]){
+      const vk=ptKey(vx,vy);
+      for(const nsk of(segsByVertex.get(vk)||[])){
+        const nc=creases.get(nsk);if(!nc||!nc.active)continue;
+        if(!excludeLks.has(nc.lineKey))return true;
+      }
+    }
+  }
+  return false;
+}
+function findRayIntersectionVertIdx(originPt,rayLk,rayAngle,excludeLks){
+  const ld=lines.get(rayLk);if(!ld)return -1;
+  const range=computeRayRange(originPt,rayLk,rayAngle);if(!range)return -1;
+  const{startIdx,endIdx}=range;
+  const goForward=angleDiff(rayAngle,vecAngle(ld.desc.dx,ld.desc.dy))<90;
+  if(goForward){
+    for(let i=startIdx;i<=endIdx;i++){
+      const c=creases.get(ld.segKeys[i]);if(!c)continue;
+      const vk=ptKey(c.bx,c.by);
+      for(const nsk of(segsByVertex.get(vk)||[])){
+        const nc=creases.get(nsk);if(!nc||!nc.active)continue;
+        if(!excludeLks.has(nc.lineKey))return i+1;
+      }
+    }
+  } else {
+    for(let i=endIdx;i>=startIdx;i--){
+      const c=creases.get(ld.segKeys[i]);if(!c)continue;
+      const vk=ptKey(c.ax,c.ay);
+      for(const nsk of(segsByVertex.get(vk)||[])){
+        const nc=creases.get(nsk);if(!nc||!nc.active)continue;
+        if(!excludeLks.has(nc.lineKey))return i;
+      }
+    }
+  }
+  return -1;
+}
+function findIntersectingLineVertex(originPt,rayLk,rayAngle,excludeLks){
+  const ld=lines.get(rayLk);if(!ld)return null;
+  const range=computeRayRange(originPt,rayLk,rayAngle);if(!range)return null;
+  const{startIdx,endIdx}=range;
+  const goForward=angleDiff(rayAngle,vecAngle(ld.desc.dx,ld.desc.dy))<90;
+  if(goForward){
+    for(let i=startIdx;i<=endIdx;i++){
+      const c=creases.get(ld.segKeys[i]);if(!c)continue;
+      const vx=c.bx,vy=c.by,vk=ptKey(vx,vy);
+      for(const nsk of(segsByVertex.get(vk)||[])){
+        const nc=creases.get(nsk);if(!nc||!nc.active)continue;
+        if(excludeLks.has(nc.lineKey))continue;
+        const crossLd=lines.get(nc.lineKey);if(!crossLd)continue;
+        for(let j=0;j<crossLd.verts.length;j++){
+          if(Math.hypot(crossLd.verts[j].x-vx,crossLd.verts[j].y-vy)<1)
+            return{x:vx,y:vy,lineKey:nc.lineKey,segIdx:j};
+        }
+      }
+    }
+  } else {
+    for(let i=endIdx;i>=startIdx;i--){
+      const c=creases.get(ld.segKeys[i]);if(!c)continue;
+      const vx=c.ax,vy=c.ay,vk=ptKey(vx,vy);
+      for(const nsk of(segsByVertex.get(vk)||[])){
+        const nc=creases.get(nsk);if(!nc||!nc.active)continue;
+        if(excludeLks.has(nc.lineKey))continue;
+        const crossLd=lines.get(nc.lineKey);if(!crossLd)continue;
+        for(let j=0;j<crossLd.verts.length;j++){
+          if(Math.hypot(crossLd.verts[j].x-vx,crossLd.verts[j].y-vy)<1)
+            return{x:vx,y:vy,lineKey:nc.lineKey,segIdx:j};
+        }
+      }
+    }
+  }
+  return null;
+}
+function guidedRangeHasActiveSegments(originPt,rayLk,rayAngle,excludeLks){
+  const ld=lines.get(rayLk);if(!ld)return false;
+  const range=computeRayRange(originPt,rayLk,rayAngle);if(!range)return false;
+  const{boundaryVertIdx}=range;
+  const goForward=angleDiff(rayAngle,vecAngle(ld.desc.dx,ld.desc.dy))<90;
+  const intersectVertIdx=findRayIntersectionVertIdx(originPt,rayLk,rayAngle,excludeLks);
+  if(intersectVertIdx<0)return false;
+  if(goForward){for(let i=boundaryVertIdx;i<intersectVertIdx;i++){const c=creases.get(ld.segKeys[i]);if(c&&c.active)return true;}}
+  else{for(let i=intersectVertIdx;i<boundaryVertIdx;i++){const c=creases.get(ld.segKeys[i]);if(c&&c.active)return true;}}
+  return false;
+}
+function rayWouldIntersect(v,side){
+  const lk=v.lineKey,ld=lines.get(lk);if(!ld)return false;
+  const fa=vecAngle(ld.desc.dx,ld.desc.dy);
+  const unsetAngle=side==='left'?(fa+180)%360:fa;
+  const vk=ptKey(v.x,v.y);
+  const allCandidates=new Set();const neighborLks=new Set([lk]);
+  for(const sk of(segsByVertex.get(vk)||[])){
+    const c=creases.get(sk);if(!c||c.lineKey===lk)continue;
+    let sdx,sdy;
+    if(Math.hypot(c.ax-v.x,c.ay-v.y)<1){sdx=c.bx-c.ax;sdy=c.by-c.ay;}
+    else{sdx=c.ax-c.bx;sdy=c.ay-c.by;}
+    const segAngle=vecAngle(sdx,sdy);
+    if(angleDiff(segAngle,unsetAngle)<90){
+      neighborLks.add(c.lineKey);
+      const range=computeRayRange({x:v.x,y:v.y},c.lineKey,segAngle);
+      for(const s of getRaySegSet(c.lineKey,range))allCandidates.add(s);
+    }
+  }
+  return rayIntersectsActive(allCandidates,neighborLks);
+}
+// A guided vertex at v is valid only if each ray it fires either reaches
+// the canvas edge cleanly or hits an active crease — WITHOUT passing through
+// any boundary vertex first (on the ray's own line OR on any crossing line).
+function guidedVertexWouldHitBoundary(v,originPt,rayLk,rayAngle){
+  const ld=lines.get(rayLk);if(!ld)return false;
+  const goForward=angleDiff(rayAngle,vecAngle(ld.desc.dx,ld.desc.dy))<90;
+  const unsetAngle=goForward?vecAngle(ld.desc.dx,ld.desc.dy):(vecAngle(ld.desc.dx,ld.desc.dy)+180)%360;
+  const vk=ptKey(v.x,v.y);
+  const excludeLks=new Set([rayLk]);
+  // Mirror onGuidedVertexSelected candidate finding exactly
+  const candidates=[];
+  for(const sk of(segsByVertex.get(vk)||[])){
+    const c=creases.get(sk);if(!c||c.lineKey===rayLk)continue;
+    let sdx,sdy;
+    if(Math.hypot(c.ax-v.x,c.ay-v.y)<1){sdx=c.bx-c.ax;sdy=c.by-c.ay;}
+    else{sdx=c.ax-c.bx;sdy=c.ay-c.by;}
+    const segAngle=vecAngle(sdx,sdy);
+    if(angleDiff(segAngle,unsetAngle)<90)candidates.push({lineKey:c.lineKey,rayAngle:segAngle});
+  }
+  for(const n of candidates)excludeLks.add(n.lineKey);
+  for(const n of candidates){
+    const nld=lines.get(n.lineKey);if(!nld)continue;
+    const range=computeRayRange({x:v.x,y:v.y},n.lineKey,n.rayAngle);if(!range)continue;
+    const goFwd=angleDiff(n.rayAngle,vecAngle(nld.desc.dx,nld.desc.dy))<90;
+    const segs=nld.segKeys;
+    const ownBounds=rayBoundaries.get(n.lineKey);
+    if(goFwd){
+      for(let i=range.startIdx;i<=range.endIdx;i++){
+        const cr=creases.get(segs[i]);if(!cr)continue;
+        const epx=cr.bx,epy=cr.by;
+        const epk=ptKey(epx,epy);
+        // 1. Check boundary on the ray's own line at this vertex index
+        if(ownBounds&&ownBounds.has(i+1))return true;
+        // 2. Check boundary on ANY crossing line at this physical point
+        let crossBoundary=false;
+        for(const nsk of(segsByVertex.get(epk)||[])){
+          const nc=creases.get(nsk);if(!nc||excludeLks.has(nc.lineKey))continue;
+          const cb=rayBoundaries.get(nc.lineKey);if(!cb||cb.size===0)continue;
+          const cnld=lines.get(nc.lineKey);if(!cnld)continue;
+          for(let j=0;j<cnld.verts.length;j++){
+            if(Math.hypot(cnld.verts[j].x-epx,cnld.verts[j].y-epy)<1){
+              if(cb.has(j)){crossBoundary=true;}
+              break;
+            }
+          }
+          if(crossBoundary)break;
+        }
+        if(crossBoundary)return true;
+        // 3. Check if there is an active crease crossing here — if so ray stops safely
+        let hasActiveCross=false;
+        for(const nsk of(segsByVertex.get(epk)||[])){
+          const nc=creases.get(nsk);if(!nc||!nc.active||excludeLks.has(nc.lineKey))continue;
+          hasActiveCross=true;break;
+        }
+        if(hasActiveCross)break;
+      }
+    } else {
+      for(let i=range.endIdx;i>=range.startIdx;i--){
+        const cr=creases.get(segs[i]);if(!cr)continue;
+        const epx=cr.ax,epy=cr.ay;
+        const epk=ptKey(epx,epy);
+        if(ownBounds&&ownBounds.has(i))return true;
+        let crossBoundary=false;
+        for(const nsk of(segsByVertex.get(epk)||[])){
+          const nc=creases.get(nsk);if(!nc||excludeLks.has(nc.lineKey))continue;
+          const cb=rayBoundaries.get(nc.lineKey);if(!cb||cb.size===0)continue;
+          const cnld=lines.get(nc.lineKey);if(!cnld)continue;
+          for(let j=0;j<cnld.verts.length;j++){
+            if(Math.hypot(cnld.verts[j].x-epx,cnld.verts[j].y-epy)<1){
+              if(cb.has(j)){crossBoundary=true;}
+              break;
+            }
+          }
+          if(crossBoundary)break;
+        }
+        if(crossBoundary)return true;
+        let hasActiveCross=false;
+        for(const nsk of(segsByVertex.get(epk)||[])){
+          const nc=creases.get(nsk);if(!nc||!nc.active||excludeLks.has(nc.lineKey))continue;
+          hasActiveCross=true;break;
+        }
+        if(hasActiveCross)break;
+      }
+    }
+  }
+  return false;
+}
+function findNearestLine(mx,my){
+  let best=null,bd=12;
+  for(const[sk,c]of creases){const d=segDist(mx,my,c.ax,c.ay,c.bx,c.by);if(d<bd){bd=d;best=c.lineKey;}}
+  return best;
+}
+function autoDetectSide(v){
+  const lk=v.lineKey,ld=lines.get(lk);if(!ld)return null;
+  let first=v.segIdx,last=v.segIdx;
+  while(first>0&&creases.get(ld.segKeys[first-1])?.active)first--;
+  while(last<ld.segKeys.length&&creases.get(ld.segKeys[last])?.active)last++;
+  last--;
+  const hasLeft=first>0,hasRight=last<ld.segKeys.length-1;
+  if(hasLeft&&hasRight)return(v.segIdx-first)<=(last-v.segIdx+1)?'right':'left';
+  if(hasLeft)return'right';
+  if(hasRight)return'left';
+  return null;
+}
+function vertexStatus(v){
+  const auto=autoDetectSide(v);
+  if(auto)return rayWouldIntersect(v,auto)?'blocked':'free';
+  const lb=rayWouldIntersect(v,'left'),rb=rayWouldIntersect(v,'right');
+  if(lb&&rb)return'blocked';
+  return'free';
+}
+function findNearestVertex(mx,my){
+  let best=null,bestBlocked=false,bd=16;
+  for(const v of vertices.values()){
+    const d=Math.hypot(mx-v.x,my-v.y);
+    if(d<bd){bd=d;best=v;bestBlocked=vertexStatus(v)==='blocked';}
+  }
+  return best?{v:best,blocked:bestBlocked}:null;
+}
+function findNearestGuidedVertex(mx,my){
+  let best=null,bd=16;
+  for(const v of guidedVertices.values()){
+    const d=Math.hypot(mx-v.x,my-v.y);
+    if(d<bd){bd=d;best=v;}
+  }
+  return best||null;
+}
+
+function enterGuidedMode(originPt,blockedNeighbor,excludeLks){
+  const{lineKey:rayLk,rayAngle}=blockedNeighbor;
+  const ld=lines.get(rayLk);if(!ld)return;
+  const range=computeRayRange(originPt,rayLk,rayAngle);if(!range)return;
+  const{boundaryVertIdx}=range;
+  const goForward=angleDiff(rayAngle,vecAngle(ld.desc.dx,ld.desc.dy))<90;
+  const intersectVertIdx=findRayIntersectionVertIdx(originPt,rayLk,rayAngle,excludeLks);
+  if(intersectVertIdx<0)return;
+  const newGuided=new Map();
+  if(goForward){
+    for(let i=boundaryVertIdx+1;i<intersectVertIdx;i++){const v=ld.verts[i];if(!v)continue;if(guidedVertexWouldHitBoundary(v,originPt,rayLk,rayAngle))continue;newGuided.set(vKey(rayLk,i),{x:v.x,y:v.y,lineKey:rayLk,segIdx:i});}
+  } else {
+    for(let i=intersectVertIdx+1;i<boundaryVertIdx;i++){const v=ld.verts[i];if(!v)continue;if(guidedVertexWouldHitBoundary(v,originPt,rayLk,rayAngle))continue;newGuided.set(vKey(rayLk,i),{x:v.x,y:v.y,lineKey:rayLk,segIdx:i});}
+  }
+  if(newGuided.size>0){
+    guidedVertices=newGuided;guidedMode=true;guidedHovered=null;
+    guidedRayOrigin=originPt;guidedRayLk=rayLk;guidedRayAngle=rayAngle;
+  }
+}
+
+function onGuidedVertexSelected(gv){
+  const rayOrigin=guidedRayOrigin,rayLk=guidedRayLk,rayAngle=guidedRayAngle;
+  clearGuidedMode();
+  const ld=lines.get(rayLk);if(!ld)return;
+  const range=computeRayRange(rayOrigin,rayLk,rayAngle);if(!range)return;
+  const{boundaryVertIdx}=range;
+  const goForward=angleDiff(rayAngle,vecAngle(ld.desc.dx,ld.desc.dy))<90;
+  if(goForward){for(let i=boundaryVertIdx;i<gv.segIdx;i++){const c=creases.get(ld.segKeys[i]);if(c)c.active=true;}}
+  else{for(let i=gv.segIdx;i<boundaryVertIdx;i++){const c=creases.get(ld.segKeys[i]);if(c)c.active=true;}}
+  const vPoint={x:gv.x,y:gv.y};
+  const unsetAngle=goForward?vecAngle(ld.desc.dx,ld.desc.dy):(vecAngle(ld.desc.dx,ld.desc.dy)+180)%360;
+  const excludeLks=new Set([rayLk]);
+  const vk=ptKey(vPoint.x,vPoint.y);
+  const candidates=[];
+  for(const sk of(segsByVertex.get(vk)||[])){
+    const c=creases.get(sk);if(!c||c.lineKey===rayLk)continue;
+    let sdx,sdy;
+    if(Math.hypot(c.ax-vPoint.x,c.ay-vPoint.y)<1){sdx=c.bx-c.ax;sdy=c.by-c.ay;}
+    else{sdx=c.ax-c.bx;sdy=c.ay-c.by;}
+    const segAngle=vecAngle(sdx,sdy);
+    if(angleDiff(segAngle,unsetAngle)<90)candidates.push({lineKey:c.lineKey,rayAngle:segAngle});
+  }
+  for(const n of candidates)excludeLks.add(n.lineKey);
+  let autoTriggerV=null;
+  for(const n of candidates){
+    const rayRange=computeRayRange(vPoint,n.lineKey,n.rayAngle);
+    const segs=getRaySegSet(n.lineKey,rayRange);
+    if(!rayIntersectsActive(segs,excludeLks)){
+      activateRay(vPoint,n.lineKey,n.rayAngle);
+    } else {
+      const intersectVertIdx=findRayIntersectionVertIdx(vPoint,n.lineKey,n.rayAngle,excludeLks);
+      if(intersectVertIdx>=0){
+        activatePartialRaySegments(n.lineKey,n.rayAngle,rayRange.boundaryVertIdx,intersectVertIdx);
+        const crossV=findIntersectingLineVertex(vPoint,n.lineKey,n.rayAngle,excludeLks);
+        if(crossV)autoTriggerV=crossV;
+      }
+    }
+  }
+  if(autoTriggerV)onBlockedVertex(autoTriggerV);
+  if(!guidedMode)drainGuidedQueue();
+}
+
+function doTrim(v,side){
+  traceAndRemove(v.lineKey,v.segIdx,side);
+  addRayBoundary(v.lineKey,v.segIdx);
+  applyDoubleBoundDeletion();
+  activate60Neighbors({x:v.x,y:v.y},side,v.lineKey);
+  hoveredVertex=null;hoveredBlocked=false;
+  draw();
+  document.getElementById('inf').textContent='Trimmed. Hover a vertex to trim further, or Clear to reset.';
+}
+
+function onBlockedVertex(v){
+  const side=autoDetectSide(v);if(!side)return;
+  traceAndRemove(v.lineKey,v.segIdx,side);
+  addRayBoundary(v.lineKey,v.segIdx);
+  applyDoubleBoundDeletion();
+  const ld=lines.get(v.lineKey);if(!ld)return;
+  const fa=vecAngle(ld.desc.dx,ld.desc.dy);
+  const unsetAngle=side==='left'?(fa+180)%360:fa;
+  const neighbors=getNeighborsFromPoint({x:v.x,y:v.y},unsetAngle,v.lineKey);
+  const excludeLks=new Set([v.lineKey]);
+  for(const n of neighbors)excludeLks.add(n.lineKey);
+  for(const n of neighbors){
+    const range=computeRayRange({x:v.x,y:v.y},n.lineKey,n.rayAngle);
+    const segs=getRaySegSet(n.lineKey,range);
+    if(!rayIntersectsActive(segs,excludeLks)){activateRay({x:v.x,y:v.y},n.lineKey,n.rayAngle);}
+    else{enqueueGuidedMode({x:v.x,y:v.y},n,excludeLks);}
+  }
+  hoveredVertex=null;hoveredBlocked=false;
+  if(!guidedMode)drainGuidedQueue();
+}
+
+function handleTrim(side){if(!pickedVertex)return;const v=pickedVertex;closePopup();doTrim(v,side);}
+function closePopup(){popup.classList.remove('on');pickedVertex=null;}
+
+function draw(){
+  ctx.clearRect(0,0,Q,Q);ctx.fillStyle='#fafaf8';ctx.fillRect(0,0,Q,Q);
+  const hasSel=selectedLine!==null;
+  for(const[sk,c]of creases){
+    const isH=!hasSel&&c.lineKey===hoveredLine;
+    ctx.beginPath();ctx.moveTo(c.ax,c.ay);ctx.lineTo(c.bx,c.by);ctx.setLineDash([]);
+    if(c.active){ctx.strokeStyle='#c0392b';ctx.lineWidth=2;}
+    else if(isH){ctx.strokeStyle='#e67e22';ctx.lineWidth=2.5;}
+    else{ctx.strokeStyle='rgba(40,38,32,0.18)';ctx.lineWidth=0.75;}
+    ctx.stroke();
+  }
+  if(hasSel){
+    if(guidedMode){
+      for(const v of guidedVertices.values()){
+        const isHV=guidedHovered&&Math.hypot(v.x-guidedHovered.x,v.y-guidedHovered.y)<1;
+        ctx.beginPath();ctx.arc(v.x,v.y,isHV?6:3.5,0,Math.PI*2);
+        ctx.fillStyle=isHV?'#6c3483':'#8e44ad';ctx.fill();
+        if(isHV){ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke();}
+      }
+    } else {
+      for(const v of vertices.values()){
+        const blocked=vertexStatus(v)==='blocked';
+        const isHV=hoveredVertex&&Math.hypot(v.x-hoveredVertex.x,v.y-hoveredVertex.y)<1&&v.lineKey===hoveredVertex.lineKey;
+        ctx.beginPath();ctx.arc(v.x,v.y,isHV?6:3.5,0,Math.PI*2);
+        ctx.fillStyle=blocked?(isHV?'#1a5276':'#2471a3'):(isHV?'#e74c3c':'#c0392b');ctx.fill();
+        if(isHV){ctx.strokeStyle='#fff';ctx.lineWidth=1.5;ctx.stroke();}
+      }
+    }
+  }
+}
+
+function getMouse(e){const r=cv.getBoundingClientRect();return[(e.clientX-r.left)*(cv.width/r.width),(e.clientY-r.top)*(cv.height/r.height)];}
+function showPopup(clientX,clientY){
+  const r=cvwrap.getBoundingClientRect();
+  popup.style.left=(clientX-r.left+8)+'px';popup.style.top=(clientY-r.top+8)+'px';
+  popup.classList.add('on');
+}
+
+cv.addEventListener('mousemove',e=>{
+  if(popup.classList.contains('on'))return;
+  const[mx,my]=getMouse(e);
+  if(guidedMode){
+    const prev=guidedHovered;guidedHovered=findNearestGuidedVertex(mx,my);
+    if(guidedHovered!==prev){
+      draw();
+      document.getElementById('inf').textContent=guidedHovered?'Click to place fold here.':'Select a point along the blocked ray to place the fold.';
+    }
+    cv.style.cursor=guidedHovered?'pointer':'default';return;
+  }
+  if(selectedLine){
+    const hit=findNearestVertex(mx,my);
+    const prev=hoveredVertex,prevB=hoveredBlocked;
+    hoveredVertex=hit?hit.v:null;hoveredBlocked=hit?hit.blocked:false;
+    if(hoveredVertex!==prev||hoveredBlocked!==prevB){
+      draw();
+      document.getElementById('inf').textContent=hoveredVertex?(hoveredBlocked?'Intersection vertex — click to handle':'Click vertex to trim.'):'Hover a vertex on any active line to trim.';
+    }
+    cv.style.cursor=hoveredVertex?'pointer':'default';
+  } else {
+    const prev=hoveredLine;hoveredLine=findNearestLine(mx,my);
+    if(hoveredLine!==prev){
+      draw();
+      document.getElementById('inf').textContent=hoveredLine?'Click to select this fold line.':'Hover a line to highlight it, click to select.';
+    }
+    cv.style.cursor='crosshair';
+  }
+});
+
+cv.addEventListener('mouseleave',()=>{
+  hoveredLine=null;hoveredVertex=null;hoveredBlocked=false;guidedHovered=null;
+  if(!popup.classList.contains('on'))draw();
+});
+
+cv.addEventListener('click',e=>{
+  if(popup.classList.contains('on')){closePopup();draw();return;}
+  const[mx,my]=getMouse(e);
+  if(guidedMode){
+    const gv=findNearestGuidedVertex(mx,my);
+    if(gv){
+      onGuidedVertexSelected(gv);draw();
+      document.getElementById('inf').textContent=guidedMode?'Select a point along the blocked ray to place the fold.':'Hover a vertex on any active line to trim.';
+    }
+    return;
+  }
+  if(selectedLine){
+    const hit=findNearestVertex(mx,my);
+    if(hit){
+      if(hit.blocked){
+        onBlockedVertex(hit.v);draw();
+        document.getElementById('inf').textContent=guidedMode?'Select a point along the blocked ray to place the fold.':'Intersection vertex handled. Hover a vertex to continue.';
+        return;
+      }
+      const v=hit.v;const auto=autoDetectSide(v);
+      if(auto){doTrim(v,auto);}
+      else{
+        const lb=rayWouldIntersect(v,'left'),rb=rayWouldIntersect(v,'right');
+        if(lb&&!rb){doTrim(v,'right');return;}
+        if(rb&&!lb){doTrim(v,'left');return;}
+        pickedVertex=v;showPopup(e.clientX,e.clientY);
+      }
+    }
+  } else {
+    const lk=findNearestLine(mx,my);if(!lk)return;
+    selectedLine=lk;originLine=lk;vertices=new Map();rayBoundaries=new Map();hoveredLine=null;
+    const ld=lines.get(lk);if(!ld)return;
+    for(const sk of ld.segKeys){const c=creases.get(sk);if(c)c.active=true;}
+    addVerticesForRange(lk,0,ld.segKeys.length);
+    cv.style.cursor='default';draw();
+    document.getElementById('inf').textContent='Hover a vertex on any active line to trim.';
+  }
+});
+
+function clearAll(){
+  for(const c of creases.values())c.active=false;
+  resetState();closePopup();cv.style.cursor='crosshair';draw();
+  document.getElementById('inf').textContent='Hover a line to highlight it, click to select.';
+}
+
+build();
+window.addEventListener('resize',build);
+</script>
+</body>
+</html>
