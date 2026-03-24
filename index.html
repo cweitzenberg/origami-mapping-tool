@@ -5,14 +5,13 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Origami Triangle Grid</title>
 <style>
-  html,body { height: 100%; margin: 0; }
-  body { font-family: sans-serif; padding: 10px 12px 6px; background: #f9f9f7; color: #1a1a18; display: flex; flex-direction: column; box-sizing: border-box; overflow: hidden; }
+  body { font-family: sans-serif; margin: 0; padding: 10px 12px 14px; background: #f9f9f7; color: #1a1a18; }
   #bar { display: flex; align-items: center; gap: 10px; margin-bottom: 8px; flex-wrap: wrap; }
   #bar label { font-size: 13px; color: #555; display: flex; align-items: center; gap: 6px; }
   #bar select, #bar button { font-size: 13px; padding: 3px 10px; border: 0.5px solid #ccc; border-radius: 6px; background: #f0efeb; color: #1a1a18; cursor: pointer; }
   #leg { display: flex; gap: 14px; font-size: 12px; color: #666; margin-bottom: 6px; align-items: center; flex-wrap: wrap; }
   .ls { display: inline-block; width: 24px; height: 2px; margin-right: 4px; vertical-align: middle; }
-  #cvwrap { position: relative; flex: 1; min-height: 0; }
+  #cvwrap { position: relative; }
   #cv { display: block; cursor: crosshair; border: 0.5px solid #ddd; border-radius: 8px; }
   #inf { font-size: 12px; color: #888; margin-top: 5px; min-height: 16px; }
   #popup { display: none; position: absolute; background: #fff; border: 0.5px solid #ccc; border-radius: 8px; padding: 8px; gap: 6px; flex-direction: column; z-index: 10; min-width: 140px; box-shadow: 0 2px 8px rgba(0,0,0,0.15); }
@@ -28,8 +27,6 @@
       <option value="8">8</option>
       <option value="16" selected>16</option>
       <option value="32">32</option>
-      <option value="64">64</option>
-      <option value="128">128</option>
     </select>
   </label>
   <button onclick="clearAll()">Clear</button>
@@ -120,7 +117,7 @@ function drainGuidedQueue(){
  
 function build(){
   N=parseInt(document.getElementById('sz').value);
-  const W=Math.min(cvwrap.clientWidth||window.innerWidth, cvwrap.clientHeight||window.innerHeight);
+  const W=Math.min(cvwrap.clientWidth||560,560);
   Q=W;RH=Q/N;SIDE=RH*2/S3;
   const stepD=SIDE*S3;
   const cRange=Math.ceil((Q*S3+Q)/stepD+2)*stepD;
@@ -349,93 +346,6 @@ function rayWouldIntersect(v,side){
   }
   return rayIntersectsActive(allCandidates,neighborLks);
 }
-// A guided vertex at v is valid only if each ray it fires either reaches
-// the canvas edge cleanly or hits an active crease — WITHOUT passing through
-// any boundary vertex first (on the ray's own line OR on any crossing line).
-function guidedVertexWouldHitBoundary(v,originPt,rayLk,rayAngle){
-  const ld=lines.get(rayLk);if(!ld)return false;
-  const goForward=angleDiff(rayAngle,vecAngle(ld.desc.dx,ld.desc.dy))<90;
-  const unsetAngle=goForward?vecAngle(ld.desc.dx,ld.desc.dy):(vecAngle(ld.desc.dx,ld.desc.dy)+180)%360;
-  const vk=ptKey(v.x,v.y);
-  const excludeLks=new Set([rayLk]);
-  // Mirror onGuidedVertexSelected candidate finding exactly
-  const candidates=[];
-  for(const sk of(segsByVertex.get(vk)||[])){
-    const c=creases.get(sk);if(!c||c.lineKey===rayLk)continue;
-    let sdx,sdy;
-    if(Math.hypot(c.ax-v.x,c.ay-v.y)<1){sdx=c.bx-c.ax;sdy=c.by-c.ay;}
-    else{sdx=c.ax-c.bx;sdy=c.ay-c.by;}
-    const segAngle=vecAngle(sdx,sdy);
-    if(angleDiff(segAngle,unsetAngle)<90)candidates.push({lineKey:c.lineKey,rayAngle:segAngle});
-  }
-  for(const n of candidates)excludeLks.add(n.lineKey);
-  for(const n of candidates){
-    const nld=lines.get(n.lineKey);if(!nld)continue;
-    const range=computeRayRange({x:v.x,y:v.y},n.lineKey,n.rayAngle);if(!range)continue;
-    const goFwd=angleDiff(n.rayAngle,vecAngle(nld.desc.dx,nld.desc.dy))<90;
-    const segs=nld.segKeys;
-    const ownBounds=rayBoundaries.get(n.lineKey);
-    if(goFwd){
-      for(let i=range.startIdx;i<=range.endIdx;i++){
-        const cr=creases.get(segs[i]);if(!cr)continue;
-        const epx=cr.bx,epy=cr.by;
-        const epk=ptKey(epx,epy);
-        // 1. Check boundary on the ray's own line at this vertex index
-        if(ownBounds&&ownBounds.has(i+1))return true;
-        // 2. Check boundary on ANY crossing line at this physical point
-        let crossBoundary=false;
-        for(const nsk of(segsByVertex.get(epk)||[])){
-          const nc=creases.get(nsk);if(!nc||excludeLks.has(nc.lineKey))continue;
-          const cb=rayBoundaries.get(nc.lineKey);if(!cb||cb.size===0)continue;
-          const cnld=lines.get(nc.lineKey);if(!cnld)continue;
-          for(let j=0;j<cnld.verts.length;j++){
-            if(Math.hypot(cnld.verts[j].x-epx,cnld.verts[j].y-epy)<1){
-              if(cb.has(j)){crossBoundary=true;}
-              break;
-            }
-          }
-          if(crossBoundary)break;
-        }
-        if(crossBoundary)return true;
-        // 3. Check if there is an active crease crossing here — if so ray stops safely
-        let hasActiveCross=false;
-        for(const nsk of(segsByVertex.get(epk)||[])){
-          const nc=creases.get(nsk);if(!nc||!nc.active||excludeLks.has(nc.lineKey))continue;
-          hasActiveCross=true;break;
-        }
-        if(hasActiveCross)break;
-      }
-    } else {
-      for(let i=range.endIdx;i>=range.startIdx;i--){
-        const cr=creases.get(segs[i]);if(!cr)continue;
-        const epx=cr.ax,epy=cr.ay;
-        const epk=ptKey(epx,epy);
-        if(ownBounds&&ownBounds.has(i))return true;
-        let crossBoundary=false;
-        for(const nsk of(segsByVertex.get(epk)||[])){
-          const nc=creases.get(nsk);if(!nc||excludeLks.has(nc.lineKey))continue;
-          const cb=rayBoundaries.get(nc.lineKey);if(!cb||cb.size===0)continue;
-          const cnld=lines.get(nc.lineKey);if(!cnld)continue;
-          for(let j=0;j<cnld.verts.length;j++){
-            if(Math.hypot(cnld.verts[j].x-epx,cnld.verts[j].y-epy)<1){
-              if(cb.has(j)){crossBoundary=true;}
-              break;
-            }
-          }
-          if(crossBoundary)break;
-        }
-        if(crossBoundary)return true;
-        let hasActiveCross=false;
-        for(const nsk of(segsByVertex.get(epk)||[])){
-          const nc=creases.get(nsk);if(!nc||!nc.active||excludeLks.has(nc.lineKey))continue;
-          hasActiveCross=true;break;
-        }
-        if(hasActiveCross)break;
-      }
-    }
-  }
-  return false;
-}
 function findNearestLine(mx,my){
   let best=null,bd=12;
   for(const[sk,c]of creases){const d=segDist(mx,my,c.ax,c.ay,c.bx,c.by);if(d<bd){bd=d;best=c.lineKey;}}
@@ -475,6 +385,86 @@ function findNearestGuidedVertex(mx,my){
     if(d<bd){bd=d;best=v;}
   }
   return best||null;
+}
+ 
+// A guided vertex at v is valid only if each candidate ray it would fire
+// either reaches the canvas edge cleanly or hits an active crease — WITHOUT
+// passing through any boundary vertex first (on its own line or any crossing
+// line). Candidate rays are found the same way onGuidedVertexSelected does it.
+function guidedVertexWouldHitBoundary(v,originPt,rayLk,rayAngle){
+  const ld=lines.get(rayLk);if(!ld)return false;
+  const goForward=angleDiff(rayAngle,vecAngle(ld.desc.dx,ld.desc.dy))<90;
+  const unsetAngle=goForward?vecAngle(ld.desc.dx,ld.desc.dy):(vecAngle(ld.desc.dx,ld.desc.dy)+180)%360;
+  const vk=ptKey(v.x,v.y);
+  const excludeLks=new Set([rayLk]);
+  const candidates=[];
+  for(const sk of(segsByVertex.get(vk)||[])){
+    const c=creases.get(sk);if(!c||c.lineKey===rayLk)continue;
+    let sdx,sdy;
+    if(Math.hypot(c.ax-v.x,c.ay-v.y)<1){sdx=c.bx-c.ax;sdy=c.by-c.ay;}
+    else{sdx=c.ax-c.bx;sdy=c.ay-c.by;}
+    const segAngle=vecAngle(sdx,sdy);
+    if(angleDiff(segAngle,unsetAngle)<90)candidates.push({lineKey:c.lineKey,rayAngle:segAngle});
+  }
+  for(const n of candidates)excludeLks.add(n.lineKey);
+  for(const n of candidates){
+    const nld=lines.get(n.lineKey);if(!nld)continue;
+    const range=computeRayRange({x:v.x,y:v.y},n.lineKey,n.rayAngle);if(!range)continue;
+    const goFwd=angleDiff(n.rayAngle,vecAngle(nld.desc.dx,nld.desc.dy))<90;
+    const segs=nld.segKeys;
+    const ownBounds=rayBoundaries.get(n.lineKey);
+    if(goFwd){
+      for(let i=range.startIdx;i<=range.endIdx;i++){
+        const cr=creases.get(segs[i]);if(!cr)continue;
+        const epx=cr.bx,epy=cr.by,epk=ptKey(epx,epy);
+        // Check boundary on own line
+        if(ownBounds&&ownBounds.has(i+1))return true;
+        // Check boundary on any crossing line at this point
+        for(const nsk of(segsByVertex.get(epk)||[])){
+          const nc=creases.get(nsk);if(!nc||excludeLks.has(nc.lineKey))continue;
+          const cb=rayBoundaries.get(nc.lineKey);if(!cb||cb.size===0)continue;
+          const cnld=lines.get(nc.lineKey);if(!cnld)continue;
+          for(let j=0;j<cnld.verts.length;j++){
+            if(Math.hypot(cnld.verts[j].x-epx,cnld.verts[j].y-epy)<1){
+              if(cb.has(j))return true;
+              break;
+            }
+          }
+        }
+        // Active crease crossing here — ray stops safely
+        let hasActiveCross=false;
+        for(const nsk of(segsByVertex.get(epk)||[])){
+          const nc=creases.get(nsk);if(!nc||!nc.active||excludeLks.has(nc.lineKey))continue;
+          hasActiveCross=true;break;
+        }
+        if(hasActiveCross)break;
+      }
+    } else {
+      for(let i=range.endIdx;i>=range.startIdx;i--){
+        const cr=creases.get(segs[i]);if(!cr)continue;
+        const epx=cr.ax,epy=cr.ay,epk=ptKey(epx,epy);
+        if(ownBounds&&ownBounds.has(i))return true;
+        for(const nsk of(segsByVertex.get(epk)||[])){
+          const nc=creases.get(nsk);if(!nc||excludeLks.has(nc.lineKey))continue;
+          const cb=rayBoundaries.get(nc.lineKey);if(!cb||cb.size===0)continue;
+          const cnld=lines.get(nc.lineKey);if(!cnld)continue;
+          for(let j=0;j<cnld.verts.length;j++){
+            if(Math.hypot(cnld.verts[j].x-epx,cnld.verts[j].y-epy)<1){
+              if(cb.has(j))return true;
+              break;
+            }
+          }
+        }
+        let hasActiveCross=false;
+        for(const nsk of(segsByVertex.get(epk)||[])){
+          const nc=creases.get(nsk);if(!nc||!nc.active||excludeLks.has(nc.lineKey))continue;
+          hasActiveCross=true;break;
+        }
+        if(hasActiveCross)break;
+      }
+    }
+  }
+  return false;
 }
  
 function enterGuidedMode(originPt,blockedNeighbor,excludeLks){
