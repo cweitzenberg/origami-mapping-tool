@@ -58,13 +58,14 @@ let originLine,vertices,rayBoundaries;
 let guidedMode,guidedVertices,guidedHovered;
 let guidedRayOrigin,guidedRayLk,guidedRayAngle;
 let guidedQueue;
- 
+let deadVertices; // ptKeys of vertices removed due to no valid purples
+
 function clamp(v,lo,hi){return Math.max(lo,Math.min(hi,v));}
 function snap(v){return Math.round(v*1e3)/1e3;}
 function ptKey(x,y){return snap(x)+','+snap(y);}
 function segKey(ax,ay,bx,by){const ka=ptKey(ax,ay),kb=ptKey(bx,by);return ka<kb?ka+'|'+kb:kb+'|'+ka;}
 function vKey(lk,segIdx){return lk+'::'+segIdx;}
- 
+
 function clipLine(px,py,dx,dy){
   let lo=-1e15,hi=1e15;
   if(Math.abs(dx)>1e-10){const t0=(0-px)/dx,t1=(Q-px)/dx;lo=Math.max(lo,Math.min(t0,t1));hi=Math.min(hi,Math.max(t0,t1));}
@@ -88,13 +89,14 @@ function segDist(px,py,ax,ay,bx,by){
 }
 function vecAngle(dx,dy){return(Math.atan2(dy,dx)*180/Math.PI+360)%360;}
 function angleDiff(a,b){let d=Math.abs(a-b)%360;return d>180?360-d:d;}
- 
+
 function resetState(){
   hoveredLine=null;selectedLine=null;hoveredVertex=null;hoveredBlocked=false;pickedVertex=null;
   originLine=null;vertices=new Map();rayBoundaries=new Map();
   guidedMode=false;guidedVertices=new Map();guidedHovered=null;
   guidedRayOrigin=null;guidedRayLk=null;guidedRayAngle=null;
   guidedQueue=[];
+  deadVertices=new Set();
 }
 function clearGuidedMode(){
   guidedMode=false;guidedVertices=new Map();guidedHovered=null;
@@ -114,7 +116,7 @@ function drainGuidedQueue(){
   }
   return false;
 }
- 
+
 function build(){
   N=parseInt(document.getElementById('sz').value);
   const W=Math.min(cvwrap.clientWidth||560,560);
@@ -153,7 +155,7 @@ function build(){
   for(const l of famC)registerLine(l,famA,famB);
   draw();
 }
- 
+
 function addVerticesForRange(lk,fromSeg,toSeg){
   const ld=lines.get(lk);if(!ld)return;
   for(let i=fromSeg;i<toSeg;i++){
@@ -211,6 +213,13 @@ function activateRay(startVertex,lk,rayAngle){
   const{startIdx,endIdx,boundaryVertIdx}=range;
   for(let i=startIdx;i<=endIdx;i++){const c=creases.get(ld.segKeys[i]);if(c)c.active=true;}
   addVerticesForRange(lk,startIdx,endIdx);
+  // Add the canvas edge endpoint vertex (the far end of the ray)
+  const edgeVertIdx=angleDiff(rayAngle,vecAngle(ld.desc.dx,ld.desc.dy))<90?ld.segKeys.length:0;
+  const edgeVert=ld.verts[edgeVertIdx];
+  if(edgeVert){
+    const k=vKey(lk,edgeVertIdx);
+    if(!vertices.has(k))vertices.set(k,{x:edgeVert.x,y:edgeVert.y,lineKey:lk,segIdx:edgeVertIdx});
+  }
   addRayBoundary(lk,boundaryVertIdx);
   applyDoubleBoundDeletion();
 }
@@ -363,11 +372,58 @@ function autoDetectSide(v){
   if(hasRight)return'left';
   return null;
 }
+// Dry-run of enterGuidedMode — returns number of valid guided vertices
+// without modifying any state.
+function simulateGuidedVertices(originPt,blockedNeighbor,excludeLks){
+  const{lineKey:rayLk,rayAngle}=blockedNeighbor;
+  const ld=lines.get(rayLk);if(!ld)return 0;
+  const range=computeRayRange(originPt,rayLk,rayAngle);if(!range)return 0;
+  const{boundaryVertIdx}=range;
+  const goForward=angleDiff(rayAngle,vecAngle(ld.desc.dx,ld.desc.dy))<90;
+  const intersectVertIdx=findRayIntersectionVertIdx(originPt,rayLk,rayAngle,excludeLks);
+  if(intersectVertIdx<0)return 0;
+  let count=0;
+  if(goForward){
+    for(let i=boundaryVertIdx+1;i<intersectVertIdx;i++){
+      const v=ld.verts[i];if(!v)continue;
+      if(!guidedVertexWouldHitBoundary(v,originPt,rayLk,rayAngle))count++;
+    }
+  } else {
+    for(let i=intersectVertIdx+1;i<boundaryVertIdx;i++){
+      const v=ld.verts[i];if(!v)continue;
+      if(!guidedVertexWouldHitBoundary(v,originPt,rayLk,rayAngle))count++;
+    }
+  }
+  return count;
+}
+
+
 function vertexStatus(v){
   const auto=autoDetectSide(v);
-  if(auto)return rayWouldIntersect(v,auto)?'blocked':'free';
-  const lb=rayWouldIntersect(v,'left'),rb=rayWouldIntersect(v,'right');
-  if(lb&&rb)return'blocked';
+  if(auto){
+    if(!rayWouldIntersect(v,auto))return'free';
+  } else {
+    const lb=rayWouldIntersect(v,'left'),rb=rayWouldIntersect(v,'right');
+    if(!lb&&!rb)return'free';
+  }
+  // rayWouldIntersect is true — check both sides for blocked neighbors with valid purples
+  const ld=lines.get(v.lineKey);if(!ld)return'free';
+  const fa=vecAngle(ld.desc.dx,ld.desc.dy);
+  for(const s of['left','right']){
+    const unsetAngle=s==='left'?(fa+180)%360:fa;
+    const neighbors=getNeighborsFromPoint({x:v.x,y:v.y},unsetAngle,v.lineKey);
+    const excludeLks=new Set([v.lineKey]);
+    for(const n of neighbors)excludeLks.add(n.lineKey);
+    for(const n of neighbors){
+      const range=computeRayRange({x:v.x,y:v.y},n.lineKey,n.rayAngle);
+      const segs=getRaySegSet(n.lineKey,range);
+      if(!rayIntersectsActive(segs,excludeLks))continue;
+      if(simulateGuidedVertices({x:v.x,y:v.y},n,excludeLks)>0)return'blocked';
+    }
+  }
+  // No valid purples on either side — remove and mark as dead
+  vertices.delete(vKey(v.lineKey,v.segIdx));
+  deadVertices.add(ptKey(v.x,v.y));
   return'free';
 }
 function findNearestVertex(mx,my){
@@ -386,11 +442,43 @@ function findNearestGuidedVertex(mx,my){
   }
   return best||null;
 }
- 
-// A guided vertex at v is valid only if each candidate ray it would fire
-// either reaches the canvas edge cleanly or hits an active crease — WITHOUT
-// passing through any boundary vertex first (on its own line or any crossing
-// line). Candidate rays are found the same way onGuidedVertexSelected does it.
+
+// Returns true if a vertex at segIdx on lk is trapped between boundaries
+// on both sides — meaning it exists but cannot be trimmed.
+function isDoublyBounded(lk,segIdx){
+  const bounds=rayBoundaries.get(lk);if(!bounds||bounds.size<2)return false;
+  let hasLeft=false,hasRight=false;
+  for(const b of bounds){
+    if(b<segIdx)hasLeft=true;
+    if(b>segIdx)hasRight=true;
+  }
+  return hasLeft&&hasRight;
+}
+
+// Returns true if the physical point (epx,epy) is a doubly-bounded vertex
+// on any line passing through it (excluding lines in excludeLks).
+function pointIsDoublyBounded(epx,epy,excludeLks){
+  if(deadVertices&&deadVertices.has(ptKey(epx,epy)))return true;
+  const epk=ptKey(epx,epy);
+  for(const nsk of(segsByVertex.get(epk)||[])){
+    const nc=creases.get(nsk);if(!nc)continue;
+    const cnld=lines.get(nc.lineKey);if(!cnld)continue;
+    for(let j=0;j<cnld.verts.length;j++){
+      if(Math.hypot(cnld.verts[j].x-epx,cnld.verts[j].y-epy)<1){
+        if(isDoublyBounded(nc.lineKey,j))return true;
+        break;
+      }
+    }
+  }
+  return false;
+}
+
+function lineFamily(lk){return lk.charAt(0);}
+
+// A guided vertex is valid only if each ray it fires first hits an active
+// crease on a DIFFERENT line family. Line family is determined by the lineKey
+// prefix: A, B, or C. If the first active crossing a ray reaches is on the
+// same family as the ray itself, reject the vertex.
 function guidedVertexWouldHitBoundary(v,originPt,rayLk,rayAngle){
   const ld=lines.get(rayLk);if(!ld)return false;
   const goForward=angleDiff(rayAngle,vecAngle(ld.desc.dx,ld.desc.dy))<90;
@@ -412,14 +500,14 @@ function guidedVertexWouldHitBoundary(v,originPt,rayLk,rayAngle){
     const range=computeRayRange({x:v.x,y:v.y},n.lineKey,n.rayAngle);if(!range)continue;
     const goFwd=angleDiff(n.rayAngle,vecAngle(nld.desc.dx,nld.desc.dy))<90;
     const segs=nld.segKeys;
-    const ownBounds=rayBoundaries.get(n.lineKey);
+    const rayFamily=lineFamily(rayLk);
     if(goFwd){
       for(let i=range.startIdx;i<=range.endIdx;i++){
         const cr=creases.get(segs[i]);if(!cr)continue;
         const epx=cr.bx,epy=cr.by,epk=ptKey(epx,epy);
-        // Check boundary on own line
+        if(deadVertices&&deadVertices.has(epk))return true;
+        const ownBounds=rayBoundaries.get(n.lineKey);
         if(ownBounds&&ownBounds.has(i+1))return true;
-        // Check boundary on any crossing line at this point
         for(const nsk of(segsByVertex.get(epk)||[])){
           const nc=creases.get(nsk);if(!nc||excludeLks.has(nc.lineKey))continue;
           const cb=rayBoundaries.get(nc.lineKey);if(!cb||cb.size===0)continue;
@@ -431,18 +519,18 @@ function guidedVertexWouldHitBoundary(v,originPt,rayLk,rayAngle){
             }
           }
         }
-        // Active crease crossing here — ray stops safely
-        let hasActiveCross=false;
         for(const nsk of(segsByVertex.get(epk)||[])){
           const nc=creases.get(nsk);if(!nc||!nc.active||excludeLks.has(nc.lineKey))continue;
-          hasActiveCross=true;break;
+          if(lineFamily(nc.lineKey)===rayFamily)return true;
+          return false; // different family — valid stop
         }
-        if(hasActiveCross)break;
       }
     } else {
       for(let i=range.endIdx;i>=range.startIdx;i--){
         const cr=creases.get(segs[i]);if(!cr)continue;
         const epx=cr.ax,epy=cr.ay,epk=ptKey(epx,epy);
+        if(deadVertices&&deadVertices.has(epk))return true;
+        const ownBounds=rayBoundaries.get(n.lineKey);
         if(ownBounds&&ownBounds.has(i))return true;
         for(const nsk of(segsByVertex.get(epk)||[])){
           const nc=creases.get(nsk);if(!nc||excludeLks.has(nc.lineKey))continue;
@@ -455,18 +543,18 @@ function guidedVertexWouldHitBoundary(v,originPt,rayLk,rayAngle){
             }
           }
         }
-        let hasActiveCross=false;
         for(const nsk of(segsByVertex.get(epk)||[])){
           const nc=creases.get(nsk);if(!nc||!nc.active||excludeLks.has(nc.lineKey))continue;
-          hasActiveCross=true;break;
+          if(lineFamily(nc.lineKey)===rayFamily)return true;
+          return false; // different family — valid stop
         }
-        if(hasActiveCross)break;
       }
     }
   }
   return false;
 }
- 
+
+
 function enterGuidedMode(originPt,blockedNeighbor,excludeLks){
   const{lineKey:rayLk,rayAngle}=blockedNeighbor;
   const ld=lines.get(rayLk);if(!ld)return;
@@ -486,7 +574,7 @@ function enterGuidedMode(originPt,blockedNeighbor,excludeLks){
     guidedRayOrigin=originPt;guidedRayLk=rayLk;guidedRayAngle=rayAngle;
   }
 }
- 
+
 function onGuidedVertexSelected(gv){
   const rayOrigin=guidedRayOrigin,rayLk=guidedRayLk,rayAngle=guidedRayAngle;
   clearGuidedMode();
@@ -528,17 +616,22 @@ function onGuidedVertexSelected(gv){
   if(autoTriggerV)onBlockedVertex(autoTriggerV);
   if(!guidedMode)drainGuidedQueue();
 }
- 
+
+function isEdgeVertex(v){
+  const ld=lines.get(v.lineKey);if(!ld)return false;
+  return v.segIdx===0||v.segIdx===ld.segKeys.length;
+}
+
 function doTrim(v,side){
   traceAndRemove(v.lineKey,v.segIdx,side);
   addRayBoundary(v.lineKey,v.segIdx);
   applyDoubleBoundDeletion();
-  activate60Neighbors({x:v.x,y:v.y},side,v.lineKey);
+  if(!isEdgeVertex(v))activate60Neighbors({x:v.x,y:v.y},side,v.lineKey);
   hoveredVertex=null;hoveredBlocked=false;
   draw();
   document.getElementById('inf').textContent='Trimmed. Hover a vertex to trim further, or Clear to reset.';
 }
- 
+
 function onBlockedVertex(v){
   const side=autoDetectSide(v);if(!side)return;
   traceAndRemove(v.lineKey,v.segIdx,side);
@@ -559,10 +652,10 @@ function onBlockedVertex(v){
   hoveredVertex=null;hoveredBlocked=false;
   if(!guidedMode)drainGuidedQueue();
 }
- 
+
 function handleTrim(side){if(!pickedVertex)return;const v=pickedVertex;closePopup();doTrim(v,side);}
 function closePopup(){popup.classList.remove('on');pickedVertex=null;}
- 
+
 function draw(){
   ctx.clearRect(0,0,Q,Q);ctx.fillStyle='#fafaf8';ctx.fillRect(0,0,Q,Q);
   const hasSel=selectedLine!==null;
@@ -593,14 +686,14 @@ function draw(){
     }
   }
 }
- 
+
 function getMouse(e){const r=cv.getBoundingClientRect();return[(e.clientX-r.left)*(cv.width/r.width),(e.clientY-r.top)*(cv.height/r.height)];}
 function showPopup(clientX,clientY){
   const r=cvwrap.getBoundingClientRect();
   popup.style.left=(clientX-r.left+8)+'px';popup.style.top=(clientY-r.top+8)+'px';
   popup.classList.add('on');
 }
- 
+
 cv.addEventListener('mousemove',e=>{
   if(popup.classList.contains('on'))return;
   const[mx,my]=getMouse(e);
@@ -630,12 +723,12 @@ cv.addEventListener('mousemove',e=>{
     cv.style.cursor='crosshair';
   }
 });
- 
+
 cv.addEventListener('mouseleave',()=>{
   hoveredLine=null;hoveredVertex=null;hoveredBlocked=false;guidedHovered=null;
   if(!popup.classList.contains('on'))draw();
 });
- 
+
 cv.addEventListener('click',e=>{
   if(popup.classList.contains('on')){closePopup();draw();return;}
   const[mx,my]=getMouse(e);
@@ -674,13 +767,13 @@ cv.addEventListener('click',e=>{
     document.getElementById('inf').textContent='Hover a vertex on any active line to trim.';
   }
 });
- 
+
 function clearAll(){
   for(const c of creases.values())c.active=false;
   resetState();closePopup();cv.style.cursor='crosshair';draw();
   document.getElementById('inf').textContent='Hover a line to highlight it, click to select.';
 }
- 
+
 build();
 window.addEventListener('resize',build);
 </script>
